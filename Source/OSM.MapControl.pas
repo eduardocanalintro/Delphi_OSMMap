@@ -71,7 +71,8 @@ type
   TOnItemNotify<T: class> = procedure (Sender: TObject; Item: T; Action: TListNotification) of object;
 
   // Base wrapper for list of map's child objects (mapmarks, tracks).
-  // List is linked to map and controls redrawing when an item is added or removed
+  // List is linked to map and controls redrawing when an item is added or removed.
+  // List owns added objects and disposes them on delete.
   TChildObjList<T: class> = class
   strict private
     FList: TObjectList<T>;
@@ -196,8 +197,10 @@ type
     Layer: TMapLayer;              // Number of layer the track belongs to
     Points: array of TGeoPoint;    // Geo points that form a track
     LineDrawProps: TLineDrawProps; // Drawing options
-
     constructor Create;
+    // Just a shorthand for adding a single point. Pre-allocating the array and
+    // assigning values to empty cells is always more efficient.
+    procedure AddPoint(const Point: TGeoPoint);
   end;
 
   // List of tracks.
@@ -294,6 +297,7 @@ type
     procedure DragOver(Source: TObject; X, Y: Integer; State: TDragState; var Accept: Boolean); override;
     procedure DoEndDrag(Target: TObject; X, Y: Integer); override;
     procedure KeyDown(var Key: Word; Shift: TShiftState); override;
+    procedure Loaded; override;
   strict protected
     procedure WMHScroll(var Message: TWMHScroll); message WM_HSCROLL;
     procedure WMVScroll(var Message: TWMVScroll); message WM_VSCROLL;
@@ -416,9 +420,13 @@ type
     property Zoom: Integer read FZoom;
     // Map options
     property MapOptions: TMapOptions read FMapOptions write FMapOptions;
-    // Point of center of current view area. Set this property to move view
+    // Point of center of current view area. Set this property to move view.
+    // If map is smaller than view area and resulting point falls out of the map, the 
+    // Eastmost-Southmost (Bottom-right) point is returned and any assigning to this 
+    // property has no effect.
     property CenterPoint: TGeoPoint read GetCenterPoint write SetCenterPoint;
     // Point of top-left corner of current view area. Set this property to move view
+    // If map is smaller than view area any assigning to this property has no effect.
     property NWPoint: TGeoPoint read GetNWPoint write SetNWPoint;
     // Minimal zoom level. Zoom couldn't be set to a value less than this value
     property MinZoom: TMapZoomLevel index 0 read FMinZoom write SetZoomConstraint;
@@ -435,7 +443,7 @@ type
     property MouseMode: TMapMouseMode read FMouseMode write SetMouseMode;
     // Size of margin for labels on map, in pixels
     property LabelMargin: Cardinal read FLabelMargin write SetLabelMargin;
-    // View area in map coords
+    // View area in map coords. Could be larger than the map on low zoom levels
     property ViewRect: TRect read ViewAreaRect;
     // Set of visible layers. Initially includes all layers. Quickly show/hide all layers
     // with LayersAll and LayersNone constants
@@ -871,7 +879,14 @@ end;
 
 constructor TTrack.Create;
 begin
+  inherited;
   Visible := True;
+end;
+
+procedure TTrack.AddPoint(const Point: TGeoPoint);
+begin
+  SetLength(Self.Points, Length(Self.Points) + 1);
+  Self.Points[High(Self.Points)] := Point;
 end;
 
 {~ TTrackList }
@@ -1172,6 +1187,13 @@ begin
   inherited;
 end;
 
+// Enable DoubleBuffering by default or the image will flicker
+procedure TMapControl.Loaded;
+begin
+  inherited;
+  Self.DoubleBuffered := True;
+end;
+
 // *** new methods ***
 
 // Set zoom level to new value and reposition to given point
@@ -1191,10 +1213,12 @@ begin
 
   // save bind point if zoom is valid (zoom value is used to calc geo coords)
   if FZoom <> UnassignedZoom
-    then BindCoords := MapToGeoCoords(MapBindPt)
+    then BindCoords := MapToGeoCoords(EnsureInMap(FZoom, MapBindPt))
     else BindCoords := OSM.SlippyMapUtils.MapToGeoCoords(FMinZoom, Point(0, 0));
 
   ViewBindPt := MapToView(MapBindPt); // save bind point in view coords, we'll reposition to it after zoom
+  if FZoom <> UnassignedZoom then
+    ViewBindPt := EnsureInMap(FZoom, ViewBindPt);
   FZoom := Value;
   FMapRect := TRect.Create(Point(0, 0), MapWidth(FZoom), MapHeight(FZoom));
 
@@ -1571,7 +1595,7 @@ end;
 {}//?
 function TMapControl.GetCenterPoint: TGeoPoint;
 begin
-  Result := MapToGeoCoords(ViewAreaRect.CenterPoint);
+  Result := MapToGeoCoords(EnsureInMap(FZoom, ViewAreaRect.CenterPoint));
 end;
 
 procedure TMapControl.SetCenterPoint(const GeoCoords: TGeoPoint);
@@ -1585,7 +1609,7 @@ begin
   ViewRect := ViewAreaRect;
   Pt.Offset(-ViewRect.Width div 2, -ViewRect.Height div 2);
   // move
-  SetNWPoint(Pt);
+  SetNWPoint(EnsureInMap(FZoom, Pt));
 end;
 
 // Get top-left point of the view area
